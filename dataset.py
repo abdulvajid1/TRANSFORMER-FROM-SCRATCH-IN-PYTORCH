@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 
 
 class BilingualDataset(Dataset):
-    def __init__(self, ds,tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len) -> None:
+    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len) -> None:
         super().__init__()
 
         self.ds = ds
@@ -62,9 +62,13 @@ class BilingualDataset(Dataset):
             'encoder_input' : encoder_input,
             "decoder_input" : decoder_input,
             "encoder_mask" : (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(),
-            "decoder_mask" : (decoder_input != self.pad_token & casual_mask),
+            "decoder_mask" : (decoder_input != self.pad_token & casual_mask(decoder_input.size(0))),
             'label' : decoder_label
         }
+    
+def casual_mask(size):
+    mask = torch.triu(torch.ones(1, size, size), diagonal=1)
+    return mask == 0
 
 
         
