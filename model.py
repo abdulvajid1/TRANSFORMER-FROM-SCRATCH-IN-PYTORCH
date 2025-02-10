@@ -22,7 +22,7 @@ class PositionalEncoding(nn.Module):
         self.d_model = d_model
         self.seq_len = seq_len
         pe = torch.zeros(seq_len,d_model)
-        positions = torch.arange(0, seq_len, dtype=torch.float)
+        positions = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0,d_model,2) * (-math.log(10000)/d_model))
         self.dropout = nn.Dropout(dropout)
         
@@ -74,7 +74,7 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, heads:int=8):
         super().__init__()
         # Initialize Q, K, V metrix
-        self.query_weights = nn.Linear(d_model,d_model)
+        self.query_weights = nn.Linear(d_model, d_model)
         self.key_weights = nn.Linear(d_model, d_model)
         self.value_weights = nn.Linear(d_model, d_model)
         self.output_weights = nn.Linear(d_model, d_model)
@@ -96,13 +96,13 @@ class MultiHeadAttention(nn.Module):
 
         # Attention
         context_vectors_heads ,attention_scores = MultiHeadAttention.attention_score(queries, keys, values, mask)
-        context_vectors = context_vectors_heads.transpose(2,1).contigous().view(batch_size, seq_len, self.heads*self.d_k) #batch,h,seq,dk -> batch,seq,h,dk -> batch,seq,d_model
-        return self.output_weights(context_vectors), attention_scores
+        context_vectors = context_vectors_heads.transpose(1, 2).contiguous().view(batch_size, seq_len, self.heads*self.d_k) #batch,h,seq,dk -> batch,seq,h,dk -> batch,seq,d_model
+        return self.output_weights(context_vectors)
 
     @staticmethod
     def attention_score(queries, keys, values, mask):
         d_k = queries.size(-1)
-        attention_score = (queries @ keys.transpose(-1,-2)) / torch.sqrt(d_k)
+        attention_score = (queries @ keys.transpose(-1,-2)) / math.sqrt(d_k)
         if mask is not None:
             attention_score.masked_fill_(mask==0, -1e9) # masking with very small value instead of '-inf'
         
@@ -147,7 +147,7 @@ class Encoder(nn.Module):
         self.layers = layers
         self.norm = LayerNormalization()
     
-    def forward(self,x, src_mask):
+    def forward(self, x, src_mask):
         for layer in self.layers:
             x = layer(x, src_mask)
         return self.norm(x)
@@ -162,9 +162,9 @@ class DecoderBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])
 
-    def forward(self, dec_query, encoder_output,tar_mask):
+    def forward(self, x, encoder_output,src_mask, tar_mask):
         x = self.residual_connections[0](x, lambda x: self.self_attention(x, x, x, tar_mask))
-        x = self.residual_connections[1](x, lambda x: self.cross_attention(dec_query, encoder_output, encoder_output, tar_mask))
+        x = self.residual_connections[1](x, lambda x: self.cross_attention(x, encoder_output, encoder_output, src_mask))
         x = self.residual_connections[2](x, self.feedforward)
         return x   
 
@@ -175,9 +175,9 @@ class Decoder(nn.Module):
         self.decoder_layers = layers
         self.norm = LayerNormalization()
 
-    def forward(self, x, encoder_output, tar_mask):
+    def forward(self, x, encoder_output, src_mask ,tar_mask):
         for decoder_block in self.decoder_layers:
-            x = decoder_block(x, encoder_output, tar_mask)
+            x = decoder_block(x, encoder_output, src_mask, tar_mask)
         return self.norm(x)
 
 class ProjectionLayer(nn.Module):
@@ -209,17 +209,17 @@ class Transformer(nn.Module):
         self.tgt_pos = tgt_pos
         self.projection_layer = projection_layer
 
-    def encode(self,x, src_mask):
+    def encode(self, x, src_mask):
         x = self.src_embed(x)
         x = self.src_pos(x)
         return self.encoder(x, src_mask)
     
-    def decode(self,x, tar_mask):
+    def decode(self, x, encoder_output, encoder_mask, tar_mask):
         x = self.tgt_embed(x)
         x = self.tgt_pos(x)
-        return self.decoder(x)
+        return self.decoder(x, encoder_output, encoder_mask, tar_mask)
     
-    def projection(self,x):
+    def projection(self, x):
         return self.projection_layer(x)
     
 
@@ -228,8 +228,8 @@ def build_transformer(
                       tgt_vocab_size:int, 
                       src_seq_len:int, 
                       tgt_seq_len:int,
-                      dropout:float,
                       d_model:int=512,
+                      dropout:float=0.1,
                       heads=8,
                       N:int=6,
                       d_ff:int=2048):
@@ -245,21 +245,22 @@ def build_transformer(
     for _ in range(N):
         encoder_attention = MultiHeadAttention(d_model, heads)
         feedforward = FeedForwardBlock(d_model, d_ff, dropout)
-        encoder_block = EncoderBlock(encoder_attention, feedforward)
+        encoder_block = EncoderBlock(encoder_attention, feedforward, dropout)
         encoder_blocks.append(encoder_block)
 
     # Decoder Blocks
     decoder_blocks = []
     for _ in range(N):
-        decoder_attention = MultiHeadAttention(d_model, heads)
+        decoder_self_attention = MultiHeadAttention(d_model, heads)
+        decoder_cross_attention = MultiHeadAttention(d_model,heads)
         feedforward = FeedForwardBlock(d_model, d_ff, dropout)
-        decoder_block = EncoderBlock(decoder_attention, feedforward)
+        decoder_block = DecoderBlock(decoder_self_attention, decoder_cross_attention, feedforward, dropout)
         decoder_blocks.append(decoder_block)
 
-    encoder = Encoder(nn.ModuleList(encoder_block))
-    decoder = Encoder(nn.ModuleList(decoder_block))
+    encoder = Encoder(nn.ModuleList(encoder_blocks))
+    decoder = Decoder(nn.ModuleList(decoder_blocks))
     
-    projection_layer = ProjectionLayer(d_model,tgt_vocab_size)
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
 
     transformer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer)
 
