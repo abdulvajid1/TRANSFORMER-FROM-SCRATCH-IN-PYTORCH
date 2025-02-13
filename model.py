@@ -86,17 +86,15 @@ class MultiHeadAttention(nn.Module):
         queries = self.query_weights(query) # (batch,seq,d_model)
         keys = self.key_weights(key)
         values = self.value_weights(value)
-        batch_size = queries.size(0)
-        seq_len = queries.size(1)
 
         # Splitting heads,(batch,seq,d_model) -> (batchsize,seq,heads,d_k) # (batch, head, seq, d_k)
-        queries = queries.view(batch_size, seq_len, self.heads, self.d_k).transpose(1,2)  
-        keys = keys.view(batch_size, seq_len, self.heads, self.d_k).transpose(1,2)
-        values = values.view(batch_size, seq_len, self.heads, self.d_k).transpose(1,2)
+        queries = queries.view(queries.size(0), queries.size(1), self.heads, self.d_k).transpose(1,2)  
+        keys = keys.view(keys.size(0), keys.size(1), self.heads, self.d_k).transpose(1,2)
+        values = values.view(values.size(0), values.size(1), self.heads, self.d_k).transpose(1,2)
 
         # Attention
         context_vectors_heads ,attention_scores = MultiHeadAttention.attention_score(queries, keys, values, mask)
-        context_vectors = context_vectors_heads.transpose(1, 2).contiguous().view(batch_size, seq_len, self.heads*self.d_k) #batch,h,seq,dk -> batch,seq,h,dk -> batch,seq,d_model
+        context_vectors = context_vectors_heads.transpose(1, 2).contiguous().view(context_vectors_heads.size(0), context_vectors_heads.size(2), self.heads*self.d_k) #batch,h,seq,dk -> batch,seq,h,dk -> batch,seq,d_model
         return self.output_weights(context_vectors)
 
     @staticmethod
@@ -187,7 +185,7 @@ class ProjectionLayer(nn.Module):
         self.projection = nn.Linear(d_model, vocab_size)
     
     def forward(self, x):
-        return torch.log_softmax(self.projection(x),dim=-1)
+        return self.projection(x)
     
 
 class Transformer(nn.Module):

@@ -63,7 +63,9 @@ class BilingualDataset(Dataset):
             "decoder_input" : decoder_input,
             "encoder_mask" : (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(),
             "decoder_mask" : (decoder_input != self.pad_token & casual_mask(decoder_input.size(0))),
-            'label' : decoder_label
+            'label' : decoder_label,
+            'src_text': src_text,
+            'tgt_text': tgt_text
         }
     
 def casual_mask(size):

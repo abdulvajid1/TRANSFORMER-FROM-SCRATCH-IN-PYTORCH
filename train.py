@@ -3,9 +3,9 @@ import torch.nn as nn
 from torch.utils.data import random_split, Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import BilingualDataset
+from dataset import BilingualDataset, casual_mask
 from model import build_transformer
-from config import get_config, get_weigts_file_path
+from config import get_config, get_weigts_file_path, latest_weights_file_path
 
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -15,6 +15,70 @@ from tokenizers.pre_tokenizers import Whitespace
 
 from pathlib import Path
 import tqdm
+
+
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_src.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
+
+    print('\n',sos_idx,eos_idx,'this is the tokens')
+
+    # compute next word using the encoder output at each time step
+    encoder_output = model.encode(source, source_mask)
+    # initialize the decoder input sos token
+    decoder_input = torch.empty(1,1).fill_(sos_idx).type_as(source_mask)
+
+    print(f'decoder_input: {decoder_input}')
+
+    while True:
+        if decoder_input.size(1) == max_len:
+            break
+
+        # Build mask
+        decoder_mask = casual_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+        out = model.decode(decoder_input, encoder_output, source_mask, decoder_mask)
+        prob = model.projection(out[:,-1]) # the out may contain more values as the decoder input increases, we only need last token as next word token
+        _ , next_word = torch.max(prob, dim=1)
+        # concat with next token
+        decoder_input = torch.cat([decoder_input, torch.empty(1,1).type_as(source).fill_(next_word.item())]) 
+        
+        if next_word == eos_idx:
+            break
+    return decoder_input.squeeze(0)
+
+
+
+def run_validation(model, validation_ds, tokenizer_src,tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_example=2):
+    model.eval()
+    count = 0
+
+    console_width = 80
+
+    with torch.no_grad():
+        for batch in validation_ds:
+            count += 1
+            encoder_input = batch['encoder_input'].to(device)
+            encoder_mask = batch['encoder_mask'].to(device)
+
+            assert encoder_input.size(0) == 1,'Batch size must be one'
+
+            src_text = batch['src_text'][0]
+            tgt_text = batch['tgt_text'][0]
+            model_output = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
+            model_out_text = tokenizer_tgt.decode(model_output.detach().cpu().numpy().flatten())
+
+            print('output',model_out_text,'haia')
+            print('input',model_output.detach().cpu().numpy().flatten())
+
+
+            # print_msg will be from tqdm , we use this so, the progress bar wont get disturbed
+            print_msg('-'*console_width)
+            print_msg(f'Source: {src_text}')
+            print_msg(f'Target: {tgt_text}')
+            print_msg(f'Predicted: {model_out_text}')
+
+            if count == num_example:
+                break
 
 def get_all_sentences(ds, lang):
     for item in ds:
@@ -28,6 +92,7 @@ def get_or_build_tokenizer(config, ds, lang):
         tokenizer.pre_tokenizer = Whitespace()
         trainer = WordLevelTrainer(special_tokens =["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequeny=2)
         tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
+        tokenizer.save(str(tokenizer_path))
     else:
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
 
@@ -85,14 +150,16 @@ def train_model(config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
     initial_epoch = 0
     global_step = 0
-    if config['preload']:
-        model_filename = get_weigts_file_path(config, config['preload'])
-        print('Preloading the model {model_filename}')
+    model_filename = latest_weights_file_path(config)
+    if model_filename:
+        print(f'Preloading the model {model_filename}')
         state = torch.load(model_filename)
         initial_epoch = state['epoch'] + 1
         optimizer.load_state_dict(state['optimizer_state_dict'])
         model.load_state_dict(state['model_state_dict'])
         global_step = state['global_step']
+    else:
+        print('NO file found, Train Starts from Scratch')
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id("[PAD]"),label_smoothing=0.1).to(device)
 
@@ -128,15 +195,20 @@ def train_model(config):
             optimizer.zero_grad()
 
             global_step += 1
+            run_validation(model, val_loader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_itrator.write(msg), global_step, writer)
 
             model_filename = get_weigts_file_path(config, f'{epoch:02d}')
 
-            torch.save({
+        torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 'global_step': global_step
-            }, model_filename)
+        }, model_filename)
+
+        run_validation(model, val_loader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_itrator.write(msg), global_step, writer)
+
+        
 
 
 if __name__ == "__main__":
